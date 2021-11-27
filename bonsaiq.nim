@@ -8,12 +8,15 @@
 ## The BonsaiQ is a combination of two structures; a binary external search
 ## tree and an ordered linked list.
 
+import std/volatile
+export volatile
+
+template avolatileLoad(x: untyped): untyped = x.addr.volatileLoad()
+template avolatileStore(x,y: untyped): untyped = x.addr.volatileStore(y)
+
 import bonsaiq/spec
 import bonsaiq/node
 from std/random import rand
-import nuclear
-import nuclear/atomics as natomics
-export nuclear
 
 template tslPadding*: int =
   cacheLineSize - sizeof(ptr Node) * 2 - sizeof(uint) - sizeof(uint32)
@@ -22,8 +25,8 @@ template infoPadding*: int =
 
 type
   BonsaiQ*[T] = ref object
-    head: nuclear Node
-    root: nuclear Node
+    head: ptr Node
+    root: ptr Node
     threadNum: int
     delScale: uint32
     padding: array[tslPadding, char]
@@ -43,127 +46,107 @@ proc rand[T](tsl: BonsaiQ[T]): uint32 {.inline.} =
   cast[uint32](rand(tsl.delScale.int))
 
 template readLeft(): untyped {.dirty.} =
-  when operationMark is uint:
-    operationMark = parentNode.next[].getMark
-  else:
-    operationMark = parentNode.next
-  parentNodeLeft = parentNode.left[].cptr
-  childNode = cast[nuclear Node](parentNodeLeft.address)
-  when childMark is uint:
-    childMark = parentNodeLeft.getMark
-  else:
-    childMark = parentNodeLeft.getMark
+  operationMark = parentNode.next.avolatileLoad().getMark
+  parentNodeLeft = parentNode.left.avolatileLoad()
+  childNode = parentNodeLeft.address
+  childMark = parentNodeLeft.getMark
   parentDirection = LeftDir
 
 template readRight(): untyped {.dirty.} =
-  when operationMark is uint:
-    operationMark = parentNode.next[].getMark
-  else:
-    operationMark = parentNode.next
-  parentNodeRight = parentNode.right[].cptr
-  childNode = cast[nuclear Node](parentNodeRight.address)
-  when childMark is uint:
-    childMark = parentNodeRight.getMark
-  else:
-    childMark = parentNodeRight
+  operationMark = parentNode.next.avolatileLoad().getMark
+  parentNodeRight = parentNode.right.avolatileLoad()
+  childNode = parentNodeRight.address
+  childMark = parentNodeRight.getMark
   parentDirection = RightDir
 
 template traverse(): untyped {.dirty.} =
-  if key <= parentNode.key[]:
-    when operationMark is uint:
-      operationMark = parentNode.next[].getMark
-    else:
-      operationMark = parentNode.next
-    parentNodeLeft = parentNode.left[].cptr
-    childNode = cast[nuclear Node](parentNodeLeft.address)
-    when childMark is uint:
-      childMark = parentNodeLeft.getMark
-    else:
-      childMark = parentNodeLeft
-      parentDirection = LeftDir
+  if key <= parentNode.key.avolatileLoad():
+    operationMark = parentNode.next.avolatileLoad().getMark
+    parentNodeLeft = parentNode.left.avolatileLoad()
+    childNode = parentNodeLeft.address
+    childMark = parentNodeLeft.getMark
+    parentDirection = LeftDir
   else:
-    when operationMark is uint:
-      operationMark = parentNode.next[].getMark
-    else:
-      operationMark = parentNode.next
-    parentNodeRight = parentNode.right[].cptr
-    childNode = cast[nuclear Node](parentNodeRight.address)
-    when childMark is uint:
-      childMark = parentNodeRight.getMark
-    else:
-      childMark = parentNodeRight
-      parentDirection = RightDir
+    operationMark = parentNode.next.avolatileLoad().getMark
+    parentNodeRight = parentNode.right.avolatileLoad()
+    childNode = parentNodeRight.address
+    childMark = parentNodeRight.getMark
+    parentDirection = RightDir
 
 
 proc newBonsaiQ*[T](numThreads: int): BonsaiQ[T] =
   result = new BonsaiQ[T]
+  var head, root, dummy: ptr Node
+  head = createNode()
+  root = createNode()
+  dummy = createNode()
 
-  var head = createNode()
-  var root = createNode()
-  var dummy = createNode()
+  dummy.left.avolatileStore head
+  dummy.right.avolatileStore markLeaf(dummy)
+  dummy.parent.avolatileStore root
 
-  dummy.left[] = head
-  dummy.right[] = markLeaf(dummy)
-  dummy.parent[] = root
-
-
-  head.next[] = dummy
-
-  root.left[] = dummy
-  root.key[] = 1'u
-  result[].head.nuclearAddr()[] = head
-  result[].root.nuclearAddr()[] = root
-  result[].threadNum.nuclearAddr()[] = numThreads
-  result[].delScale.nuclearAddr()[] = cast[uint32](numThreads.uint * 100.uint)
+  head.next.avolatileStore dummy
+  root.left.avolatileStore dummy
+  root.key.avolatileStore 1'u
+  result.head.avolatileStore head
+  result.root.avolatileStore root
+  result.threadNum.avolatileStore numThreads
+  result.delScale.avolatileStore cast[uint32](numThreads.uint * 100.uint)
 
 proc pqSize[T](tsl: BonsaiQ[T]): uint32 =
   var prevNode, leafNode, nextLeaf, head: ptr Node
-  head = tsl.head.cptr
+  head = tsl.head
 
-  leafNode = head[].next.cptr.address
-  nextLeaf = leafNode[].next.cptr.address
+  leafNode = head.next.address
+  nextLeaf = leafNode.next.address
 
   while not leafNode.isNil:
-    nextLeaf = leafNode[].next.cptr.address
-    if leafNode[].next.cptr.getMark == 0'u and not nextLeaf.isNil:
+    nextLeaf = leafNode.next.address
+    if leafNode.next.getMark == 0'u and not nextLeaf.isNil:
       inc result
-    leafNode = leafNode[].next.cptr.address()
+    leafNode = leafNode.next.address()
     
-template tryHelpingInsert(newNode: nuclear Node) =
+proc tryHelpingInsert(newNode: ptr Node) {.inline.} =
+  # newNode is volatile ptr
   var parentDirection: Direction
   var casNode1, casNode2: ptr Node
-  parentDirection = newNode.parentDirection[]
-  casNode1 = cptr(newNode.parent[])
-  casNode2 = cptr(newNode.left[])
 
-  if parentDirection == LeftDir and newNode.inserting[]:
-    if newNode.inserting[]:
-      discard casNode1.left.addr.compareExchange(casNode2, newNode)
-      if newNode.inserting[]:
-        newNode.inserting[] = false
-  elif parentDirection == RightDir and newNode.inserting[]:
-    if newNode.inserting[]:
-      discard casNode1.right.addr.compareExchange(casNode2, newNode)
-      if newNode.inserting[]:
-        newNode.inserting[] = false
+  parentDirection = newNode.parentDirection.avolatileLoad()
+  casNode1 = newNode.parent.avolatileLoad()
+  casNode2 = newNode.left.avolatileLoad()
+
+  template doCAS(x: untyped): untyped =
+    x.addr.atomicCompareExchangeN(casNode2.addr, newNode, false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST)
+
+  if parentDirection == LeftDir and newNode.inserting.avolatileLoad():
+    if newNode.inserting.avolatileLoad():
+      discard casNode1.left.doCAS
+      if newNode.inserting.avolatileLoad():
+        newNode.inserting.avolatileStore false
+  elif parentDirection == RightDir and newNode.inserting.avolatileLoad():
+    if newNode.inserting.avolatileLoad():
+      discard casNode1.right.doCAS
+      if newNode.inserting.avolatileLoad():
+        newNode.inserting.avolatileStore false
 
 
-proc physicalDelete[T](tsl: BonsaiQ[T], dummyNode: nuclear Node) =
-  var childNode, childNext, grandParentNode, parentNode, root: nuclear Node
-  root = tsl[].root.nuclearAddr()[]
+proc physicalDelete[T](tsl: BonsaiQ[T], dummyNode: ptr Node) =
+  # DummyNode - Volatile
+  var childNode, childNext, grandParentNode, parentNode, root: ptr Node # Volatile
+  root = tsl.root.avolatileLoad()
   var parentDirection: Direction
   var clear: uint8
   var parentNodeLeft, parentNodeRight, casVal, currentNext, markedNode: ptr Node
   var operationMark, childMark: uint
 
   parentNode = root
-  childNode = root.left[]
+  childNode = root.left.avolatileLoad()
   
   block finish:
     while true:
       if operationMark == deleteFlag:
         readRight()
-        markedNode = parentNode.cptr
+        markedNode = parentNode
         while true:
           if operationMark == deleteFlag:
             if childMark != leafFlag:
@@ -171,20 +154,20 @@ proc physicalDelete[T](tsl: BonsaiQ[T], dummyNode: nuclear Node) =
               readRight()
               continue
             else:
-              childNext = childNode.next[]
-              if childNext.inserting[] and
-                  childNext.parent[] == parentNode:
+              childNext = address(childNode.next.avolatileLoad())
+              if childNext.inserting.avolatileLoad() and
+                  childNext.parent.avolatileLoad() == parentNode:
                 tryHelpingInsert(childNext)
-              elif parentNode.right[] == childNode.markLeaf:
-                if grandParentNode.key[] != 0'u:
-                  grandParentNode.key[] = 0'u
+              elif parentNode.right.avolatileLoad() == childNode.markLeaf:
+                if grandParentNode.key.avolatileLoad() != 0'u:
+                  grandParentNode.key.avolatileStore 0'u
                   break finish
               readRight()
               continue
           else:
-            if not grandParentNode.next[].getMark != 0'u:
-              if grandParentNode.left[].cptr == markedNode:
-                if grandParentNode.left.compareExchange(markedNode, parentNode):
+            if not getMark(grandParentNode.next.avolatileLoad()) != 0'u:
+              if grandParentNode.left.avolatileLoad() == markedNode:
+                if grandParentNode.left.addr.atomicCompareExchangeN(markedNode.addr, parentNode, false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST):
                   readLeft()
                   break
                 parentNode = grandParentNode
@@ -193,24 +176,24 @@ proc physicalDelete[T](tsl: BonsaiQ[T], dummyNode: nuclear Node) =
             break finish
       else:
         if childMark != leafFlag:
-          if parentNode.key[] == 0'u or parentNode == dummyNode:
-            if parentNode.key[] != 0'u:
-              parentNode.key[] = 0'u
+          if parentNode.key.avolatileLoad() == 0'u or parentNode == dummyNode:
+            if parentNode.key.avolatileLoad() != 0'u:
+              parentNode.key.avolatileStore 0'u
             break finish
           grandParentNode = parentNode
           parentNode = childNode
           readLeft()
           continue
         else:
-          currentNext = childNode.next[].cptr
-          childNext = cast[nuclear Node](currentNext.address)
+          currentNext = childNode.next.avolatileLoad()
+          childNext = currentNext.address
           if currentNext.getMark != 0'u:
-            if childNext.inserting[] and
-                childNext.parent[] == parentNode:
+            if childNext.inserting.avolatileLoad() and
+                childNext.parent.avolatileLoad() == parentNode:
               tryHelpingInsert(childNext)
-            elif parentNode.left[] == childNode.markLeaf:
-              if childNext.key[] != 0'u:
-                childNext.key[] = 0'u
+            elif parentNode.left.avolatileLoad() == childNode.markLeaf:
+              if childNext.key.avolatileLoad() != 0'u:
+                childNext.key.avolatileStore 0'u
               break finish
             readLeft()
             continue
@@ -219,66 +202,66 @@ proc physicalDelete[T](tsl: BonsaiQ[T], dummyNode: nuclear Node) =
 proc insertSearch[T](tsl: BonsaiQ[T], key: uint): RecordInfo =
   # Locates an active preceding leaf node to the key, together with
   # that leafs parent and its succeeding leaf.
-  var childNode, grandParentNode, parentNode, root: nuclear Node
+  var childNode, grandParentNode, parentNode, root: ptr Node # Volatile
   var childNext, currentNext, parentNodeRight, parentNodeLeft, markedNode: ptr Node
   var parentDirection: Direction
-  var operationMark: Nuclear[Nuclear[Node]]
-  var childMark: ptr Node
+  var operationMark, childMark {.volatile.}: uint
+  childMark = 0'u
 
-  root = tsl[].root.nuclearAddr()[]
+  root = tsl.root.avolatileLoad()
 
   var insSeek = RecordInfo()
 
   parentNode = root
-  childNode = root.left[]
+  childNode = root.left.avolatileLoad
   while true:
-    if not operationMark.isNil and operationMark[].getMark == deleteFlag.uint:
+    if operationMark == deleteFlag.uint:
       readRight()
-      markedNode = parentNode.cptr
+      markedNode = parentNode
 
       while true:
-        if operationMark[].getMark == deleteFlag.uint:
-          if childMark.getMark != leafFlag.uint:
+        if operationMark == deleteFlag.uint:
+          if childMark != leafFlag.uint:
             parentNode = childNode
             readRight()
             continue
           else:
-            parentNode = childNode.next[].address
+            parentNode = address(childNode.next.avolatileLoad())
             readRight()
             break
         else:
           if rand(tsl) < insertCleanRate:
-            if not (grandParentNode.next[].getMark != 0'u) and
-                grandParentNode.left[].cptr == markedNode:
-              discard grandParentNode.left.compareExchange(markedNode, parentNode)
+            if not (grandParentNode.next.avolatileLoad().getMark != 0'u) and
+                grandParentNode.left.avolatileLoad() == markedNode:
+              discard grandParentNode.left.addr.atomicCompareExchangeN(markedNode.addr, parentNode, false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST) # FIXME
           traverse()
           break
       continue
-    if childMark.getMark != leafFlag:
+    if childMark != leafFlag:
       grandParentNode = parentNode
       parentNode = childNode
       traverse()
     else:
-      currentNext = childNode.next[].cptr
+      currentNext = childNode.next.avolatileLoad()
       childNext = currentNext.address
       if currentNext.getMark != 0'u:
         # REVIEW GO_NEXT
-        parentNode = cast[nuclear Node](childNext)
+        parentNode = childNext
         readRight()
-      elif (not childNext.isNil()) and childNext[].inserting:
-        tryHelpingInsert(cast[nuclear Node](childNext))
-        parentNode = cast[nuclear Node](childNext)
+      elif (not childNext.isNil()) and childNext.inserting:
+        tryHelpingInsert(childNext)
+        parentNode = childNext
         traverse()
-      elif (not childNext.isNil()) and childNext[].key == key:
+      elif (not childNext.isNil()) and childNext.key == key:
         insSeek.duplicate = DuplDir
         return insSeek
       elif (parentDirection == LeftDir and
-          parentNode.left[] == childNode.markLeaf()) or
+          parentNode.left.avolatileLoad() == childNode.markLeaf()) or
           (parentDirection == RightDir and
-          parentNode.right[] == childNode.markLeaf()):
-        insSeek.child = childNode.cptr
-        insSeek.casNode1 = parentNode.cptr
-        insSeek.casNode2 = childNode.markLeaf().cptr
+          parentNode.right.avolatileLoad() == childNode.markLeaf()):
+        insSeek.child = childNode
+        insSeek.casNode1 = parentNode
+        insSeek.casNode2 = childNode.markLeaf()
         insSeek.nextNode = childNext
         insSeek.parentDirection = parentDirection
         return insSeek
@@ -306,6 +289,7 @@ proc pop*[T](tsl: BonsaiQ[T]): T =
     # Template is used to prepare the received value from the node
     # by converting it into its original type and decreasing its
     # ref count if it is a ref
+    atomicThreadFence(ATOMIC_ACQUIRE)
     when T is ref:
       let res = cast[T](x)
       GC_unref res
@@ -313,28 +297,28 @@ proc pop*[T](tsl: BonsaiQ[T]): T =
     else:
       cast[T](x)
     
-  var leafNode, nextLeaf, head: nuclear Node
+  var leafNode, nextLeaf, head: ptr Node # Volatile
   var xorNode, currentNext, headItemNode, newHead: ptr Node
   var value: uint
 
   # The operation will start from the head and perform a linear search
   # on the list until a an active dummy node is located.
-  head = tsl.head
+  head = tsl.head.avolatileLoad()
 
-  headItemNode = head.next[].cptr
-  leafNode = cast[nuclear Node](headItemNode)
+  headItemNode = head.next.avolatileLoad()
+  leafNode = headItemNode
 
-  if previousHead == leafNode.cptr:
-    leafNode = cast[nuclear Node](previousDummy)
+  if previousHead == leafNode:
+    leafNode = previousDummy
   else:
     previousHead = headItemNode
 
   # Begin linear search loop of list
   while true:
-    currentNext = leafNode.next[].cptr
-    nextLeaf = cast[nuclear Node](currentNext)
+    currentNext = leafNode.next.avolatileLoad()
+    nextLeaf = currentNext
     if nextLeaf.isNil:
-      previousDummy = leafNode.cptr
+      previousDummy = leafNode
       break
     if currentNext.getMark != 0'u:
       leafNode = nextLeaf
@@ -342,12 +326,12 @@ proc pop*[T](tsl: BonsaiQ[T]): T =
       # Global Atomic Update I
       # Logically delete the dummy by settings the next pointers
       # delete flag to true.
-      xorNode = leafNode.next.fetchXor(1, moAcquire).cptr # REVIEW - wouldnt this turn off a deleted node though? :/
+      xorNode = cast[ptr Node](cast[ptr int](leafNode.next.addr).atomicFetchXor(1, ATOMIC_ACQUIRE)) # wouldnt this turn off a deleted node though? :/
       # Success of this operation linearizes operations
       if xorNode.getMark == 0'u:
         # The suceeding leaf value is read; and that leaf becomes the new dummy
         # node.
-        value = xorNode.address()[].value
+        value = xorNode.value
         previousDummy = xorNode
         if tsl.rand >= physicalDeleteRate:
           # Random selection of operations based on the number of concurrent
@@ -355,28 +339,28 @@ proc pop*[T](tsl: BonsaiQ[T]): T =
           # and simply return the value received.
           result = value.ready
           break
-        if head.next[].cptr == headItemNode:
+        if head.next.avolatileLoad() == headItemNode:
           # Global Atomic Update II
           # Physically delete the logically deleted dummy from the list
           # by updating the head nodes next pointer from the deleted dummy
           # to the new active dummy
-          if head.next.compareExchange(headItemNode, xorNode):
+          if head.next.addr.atomicCompareExchangeN(headItemNode.addr, xorNode, false, ATOMIC_SEQ_CST, ATOMIC_SEQ_CST): # FIXME
             previousHead = xorNode
-            if xorNode[].key != 0'u:
-              xorNode[].key = 0'u
+            if xorNode.key != 0'u:
+              xorNode.key = 0'u
               # Global Atomic Update III
               # Within the physical delete operation, we update the closest
               # active ancestors left child pointer to point to the active dummy.
               # It is likely that is already the case, in which case it is ignored.
-              physicalDelete(tsl, cast[nuclear Node](xorNode))
-              nextLeaf = cast[nuclear Node](headItemNode)
-              while nextLeaf.cptr != xorNode:
-                currentNext = nextLeaf.cptr
-                nextLeaf = nextLeaf.next[].address
+              physicalDelete(tsl, xorNode)
+              nextLeaf = headItemNode
+              while nextLeaf != xorNode:
+                currentNext = nextLeaf
+                nextLeaf = address(nextLeaf.next.avolatileLoad())
                 freeNode(currentNext)
         result = value.ready
         break
-      leafNode = cast[nuclear Node](xorNode.address)
+      leafNode = xorNode.address
 
       
 
@@ -400,6 +384,7 @@ proc push*[T](tsl: BonsaiQ[T]; vkey: Natural, val: T): bool =
   # Begin by increasing the ref count of the val if it is a ref
   when T is ref:
     GC_ref val
+  atomicThreadFence(ATOMIC_RELEASE)
   template clean: untyped =
     # This template will be used if the push fails to dec the ref count
     when T is ref:
@@ -408,17 +393,17 @@ proc push*[T](tsl: BonsaiQ[T]; vkey: Natural, val: T): bool =
       discard
 
   var value = cast[uint](val)
-  var casNode1, casNode2, leafNode: nuclear Node
+  var casNode1, casNode2, leafNode: ptr Node # Volatile
   var nextLeaf: ptr Node
   var parentDirection: Direction
   var insSeek: RecordInfo
 
   # First we create a new node that we will insert into the tree with the val
   # provided
-  var newNode: nuclear Node = createNode()
-  newNode.right[] = markLeaf(newNode)
-  newNode.key[] = key
-  newNode.value[] = value
+  var newNode = createNode() # Volatile
+  newNode.right.avolatileStore markLeaf(newNode)
+  newNode.key.avolatileStore key
+  newNode.value.avolatileStore value
 
   # Begin insert-loop
   while true:
@@ -439,38 +424,40 @@ proc push*[T](tsl: BonsaiQ[T]; vkey: Natural, val: T): bool =
       continue
     # We now prepare to insert the new node
     parentDirection = insSeek.parentDirection
-    casNode1 = cast[nuclear Node](insSeek.casNode1)
-    casNode2 = cast[nuclear Node](insSeek.casNode2)
-    leafNode = cast[nuclear Node](insSeek.child)
+    casNode1 = insSeek.casNode1
+    casNode2 = insSeek.casNode2
+
+    leafNode = insSeek.child # Insertion point
     nextLeaf = insSeek.nextNode
-    newNode.left[] = leafNode.markLeaf
-    newNode.parentDirection[] = parentDirection
-    newNode.parent[] = casNode1
-    newNode.next[] = cast[nuclear Node](nextLeaf)
-    newNode.inserting[] = true
-    if leafNode.next[].cptr == nextLeaf:
+    # Prepare internal node and its children
+    newNode.left.avolatileStore leafNode.markLeaf
+    newNode.parentDirection.avolatileStore parentDirection
+    newNode.parent.avolatileStore casNode1
+    newNode.next.avolatileStore nextLeaf
+    newNode.inserting.avolatileStore true
+    if leafNode.next.avolatileLoad == nextLeaf:
       template casDir(casDir: Direction): untyped =
         # The node is inserted with two global linearizeable atomic updates
-        if leafNode.next[].cptr == nextLeaf:
+        if leafNode.next.avolatileLoad == nextLeaf:
           # Atomically add the new node to the list by updating the preceding
           # leaf nodes next pointer from the old succeeding node to our newnode.
-          if leafNode.next.compareExchange(nextLeaf, newNode, moAcquire):
+          if leafNode.next.addr.atomicCompareExchangeN(nextLeaf.addr, newNode, false, ATOMIC_ACQUIRE, ATOMIC_ACQUIRE): # FIXME
             # Success of the previous CAS linearizes the insert operation and
             # the new node becomes active
-            if newNode.inserting[]:
+            if newNode.inserting.avolatileLoad:
               # We now atomically add the new node to the tree by updating
               # the preceding parent nodes child pointer from the preceding
               # node to the new node with the leaf flag set to false.
               when casDir == RightDir:
-                if casNode1.right[] == casNode2:
-                  discard casNode1.right.compareExchange(casNode2, newNode, moRelease)
+                if casNode1.right.avolatileLoad == casNode2:
+                  discard casNode1.right.addr.atomicCompareExchangeN(casNode2.addr, newNode, false, ATOMIC_RELEASE, ATOMIC_RELEASE)
 
               elif casDir == LeftDir:
-                if casNode1.left[] == casNode2:
-                  discard casNode1.left.compareExchange(casNode2, newNode, moRelease)
+                if casNode1.left.avolatileLoad == casNode2:
+                  discard casNode1.left.addr.atomicCompareExchangeN(casNode2.addr, newNode, false, ATOMIC_RELEASE, ATOMIC_RELEASE)
               
-              if newNode.inserting[]:
-                newNode.inserting[] = false
+              if newNode.inserting.avolatileLoad:
+                newNode.inserting.avolatileStore false
               # The insert completes and returns true
             return true # END; SUCCESS INSERT
 

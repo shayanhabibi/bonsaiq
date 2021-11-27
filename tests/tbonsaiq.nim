@@ -38,6 +38,14 @@ newSeq(threads, threadCount)
 for thread in threads.mitems:
   createThread(thread, doStuff)
 
+var obj = new Obj
+obj.field1 = (1)
+obj.field2 = (2)
+discard tsl.push(1, obj)
+var obj2 = new Obj
+obj2.field1 = (1)
+obj2.field2 = (2)
+discard tsl.push(1, obj)
 while x < 100:
   var obj = new Obj
   obj.field1 = (inc x; x)

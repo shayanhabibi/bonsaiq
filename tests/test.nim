@@ -8,7 +8,7 @@ import std/macros
 import balls
 import cps
 
-import disrubscok
+import bonsaiq
 
 const
   continuationCount = 10
@@ -27,7 +27,7 @@ setLogFilter:
   else:
     lvlDebug
 
-var q: TslQueue[Continuation]
+var q: BonsaiQ[Continuation]
 
 proc runThings() {.thread.} =
   {.cast(gcsafe).}:
@@ -70,7 +70,7 @@ suite "disrubscok":
     ## creation and initialization of the queue
 
     # Moment of truth
-    q = newTslQueue[Continuation](threadCount)
+    q = newBonsaiQ[Continuation](threadCount)
 
   block:
     ## run some continuations through the queue in another thread
